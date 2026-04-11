@@ -1,0 +1,4 @@
+pypdf==5.4.0
+opencv-python==4.11.0.86
+# OCR stack (next step)
+paddleocr==2.9.1

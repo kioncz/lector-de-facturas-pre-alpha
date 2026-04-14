@@ -1,55 +1,23 @@
 # Lector de facturas con PaddleOCR
 
-Proyecto Python para procesar facturas en PDF o imagen, detectar si el PDF es escaneado, convertir paginas a PNG, aplicar OCR con PaddleOCR y exportar resultados en JSON/TXT/DOCX.
+Proyecto Python para procesar facturas en PDF o imagen usando PaddleOCR, con salida estructurada y lectura de tablas.
 
-## Estado actual (v1.0.0)
+## Version actual
 
-- Motor OCR unificado: solo PaddleOCR.
-- Compatibilidad estabilizada para Windows con Python 3.13.
-- OCR multi-pagina para PDF.
-- Exportacion de resultados estructurados y texto plano.
+v1.0.1
 
-## Problema principal detectado
+## Novedades de v1.0.1
 
-Durante las pruebas, el flujo devolvia salida vacia o `"motor": "error"` aun cuando el archivo de entrada era correcto. El error observado fue:
+- Mejor deteccion y lectura de bloques con estructura de documento.
+- Mejor lectura de tablas en facturas.
+- Exportacion DOCX mas limpia y legible.
+- Correccion de duplicados en resultados.
+- Eliminacion de ruido en la lectura final.
 
-`ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]`
+## Requisitos
 
-Ese fallo no era del enrutamiento del proyecto, sino una incompatibilidad de runtime en la combinacion Paddle/PaddleOCR usada en Windows.
-
-## Como se resolvio
-
-1. Se elimino RapidOCR del flujo y de dependencias para evitar rutas paralelas de ejecucion.
-2. Se fijo el stack OCR en:
-   - `paddleocr==3.4.0`
-   - `paddlepaddle==3.2.2`
-3. Se forzo `ocr_version="PP-OCRv3"` para mantener una combinacion estable con idioma espanol.
-4. Se ajustaron flags de compatibilidad en runtime (`mkldnn/onednn/pir`) para evitar rutas problematicas.
-5. Se adapto el parser al formato real de salida de PaddleOCR 3.x (`dt_polys`, `rec_texts`, `rec_scores`).
-
-## Funcionalidades
-
-- Deteccion de tipo de archivo (`pdf`, `png`, `jpg`, `jpeg`).
-- Analisis PDF:
-  - Verifica encabezado `%PDF-`.
-  - Extrae metadatos y texto base.
-  - Detecta PDF escaneado por cantidad de palabras.
-  - Convierte todas las paginas a PNG a 500 DPI aprox.
-- Analisis imagen:
-  - Preprocesado con OpenCV.
-  - OCR con PaddleOCR.
-- Salidas:
-  - `resultado_*.json` con estructura OCR y bounding boxes.
-  - `texto_*.txt` con texto extraido.
-  - `ocr_*.docx` con texto y estructura.
-
-## Estructura principal
-
-- `scr/proceso_principal.py`: orquestacion y guardado de salidas.
-- `scr/procesador_pdf.py`: validacion y conversion PDF->PNG.
-- `scr/procesador_imagen.py`: preprocesado OpenCV y llamada OCR.
-- `scr/motor_ocr.py`: wrapper PaddleOCR y normalizacion de resultados.
-- `requirements.txt`: dependencias del proyecto.
+- Python 3.13
+- Dependencias en `requirements.txt`
 
 ## Instalacion
 
@@ -59,24 +27,40 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Configuracion del archivo de entrada
+
+El archivo a procesar se define en `RUTA_ARCHIVO_ENTRADA` dentro de `scr/proceso_principal.py`.
+
+Ejemplo:
+
+```python
+RUTA_ARCHIVO_ENTRADA = "entrada/ejemplo.pdf"
+```
+
 ## Ejecucion
 
 ```powershell
 .\.venv\Scripts\python.exe scr\proceso_principal.py
 ```
 
-Por defecto procesa la ruta configurada en `RUTA_ARCHIVO_ENTRADA` dentro de `scr/proceso_principal.py`.
+## Salidas
 
-## Salidas esperadas
+Se generan en la carpeta `salida/`:
 
-En carpeta `salida/` se generan:
+- `resultado_<archivo>.json` con OCR y estructura.
+- `texto_<archivo>.txt` con texto final limpio.
+- `ocr_<archivo>.docx` con contenido final formateado.
 
-- `resultado_<archivo>.json`
-- `texto_<archivo>.txt`
-- `ocr_<archivo>.docx`
+## Estructura del proyecto
 
-## Seguridad y buenas practicas para Git
+- `scr/proceso_principal.py`: flujo principal y exportaciones.
+- `scr/procesador_pdf.py`: lectura PDF y conversion por pagina.
+- `scr/procesador_imagen.py`: preprocesado y llamada OCR.
+- `scr/motor_ocr.py`: motor OCR y parseo de estructura/layout.
+- `requirements.txt`: dependencias del proyecto.
 
-- No subir archivos sensibles (credenciales, tokens, llaves privadas).
-- No subir artefactos temporales o de ejecucion local (`__pycache__`, salidas de prueba, configs locales IDE).
-- Revisar siempre `git status` antes de commit/push para confirmar que solo viajan archivos de codigo y documentacion.
+## Notas tecnicas
+
+- OCR principal basado en PaddleOCR 3.4.0.
+- Runtime estable con PaddlePaddle 3.2.2.
+- Soporte de estructura/layout para aproximar salida al formato de factura original.

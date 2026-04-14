@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import shutil
 
@@ -11,13 +13,6 @@ class ProcesadorPDF:
 
     def procesar(self, ruta_pdf: Path, carpeta_salida: Path) -> dict:
         info = self._leer_info_pdf(ruta_pdf, carpeta_salida)
-        # Si es tupla (escaneado y convertido), captura la PNG también
-        if isinstance(info, tuple):
-            resultado_dict, ruta_png_generada = info
-            resultado_dict["tipo"] = "pdf_escaneado_convertido"
-            resultado_dict["ruta_png_para_ocr"] = str(ruta_png_generada)
-            return resultado_dict
-        
         return {
             "tipo": "pdf",
             "archivo": ruta_pdf.name,
@@ -25,7 +20,7 @@ class ProcesadorPDF:
             **info,
         }
 
-    def _leer_info_pdf(self, ruta_pdf: Path, carpeta_salida: Path) -> dict | tuple[dict, Path]:
+    def _leer_info_pdf(self, ruta_pdf: Path, carpeta_salida: Path) -> dict:
         # Validacion ligera de firma PDF para cortar errores pronto.
         with ruta_pdf.open("rb") as stream:
             header = stream.read(5)
@@ -71,15 +66,17 @@ class ProcesadorPDF:
         }
 
         if es_escaneado:
-            ruta_png = self._convertir_pdf_a_png(ruta_pdf, carpeta_salida)
-            resultado["salida_png_500dpi"] = str(ruta_png)
-            resultado["nota"] = f"PDF escaneado detectado ({total_palabras} palabras). Convertido a PNG en 500 DPI para OCR"
-            return resultado, ruta_png
+            resultado["nota"] = f"PDF escaneado detectado ({total_palabras} palabras). Se enviara a OCR via PNG"
+        else:
+            resultado["nota"] = "PDF con contenido legible. Se enviara a OCR via PNG"
 
-        resultado["nota"] = "PDF con contenido legible. Texto extraído exitosamente"
+        rutas_png = self._convertir_pdf_a_png(ruta_pdf, carpeta_salida)
+        resultado["salida_png_500dpi"] = [str(ruta_png) for ruta_png in rutas_png]
+        resultado["rutas_png_para_ocr"] = [str(ruta_png) for ruta_png in rutas_png]
+        resultado["ruta_png_para_ocr"] = str(rutas_png[0]) if rutas_png else None
         return resultado
 
-    def _convertir_pdf_a_png(self, ruta_pdf: Path, carpeta_salida: Path) -> Path:
+    def _convertir_pdf_a_png(self, ruta_pdf: Path, carpeta_salida: Path) -> list[Path]:
         try:
             import fitz  # type: ignore
         except ImportError:
@@ -91,12 +88,15 @@ class ProcesadorPDF:
         if len(doc) == 0:
             raise ValueError(f"El PDF esta vacio: {ruta_pdf.name}")
 
-        # Convierte la primera página a PNG con DPI 500 (aprox. 6.94x zoom para 72 DPI base)
-        pagina = doc.load_page(0)
         matriz = fitz.Matrix(6.94, 6.94)  # Aproximadamente 500 DPI
-        pixmap = pagina.get_pixmap(matrix=matriz)
-        
-        ruta_png = carpeta_salida / f"convertido_{ruta_pdf.stem}.png"
-        pixmap.save(str(ruta_png))
+        rutas_png: list[Path] = []
+
+        for numero_pagina in range(len(doc)):
+            pagina = doc.load_page(numero_pagina)
+            pixmap = pagina.get_pixmap(matrix=matriz)
+            ruta_png = carpeta_salida / f"convertido_{ruta_pdf.stem}_p{numero_pagina + 1}.png"
+            pixmap.save(str(ruta_png))
+            rutas_png.append(ruta_png)
+
         doc.close()
-        return ruta_png
+        return rutas_png

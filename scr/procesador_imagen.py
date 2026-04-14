@@ -23,10 +23,7 @@ class ProcesadorImagenOpenCV:
 
         gris = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
         suavizada = cv2.GaussianBlur(gris, (3, 3), 0)
-        binaria = cv2.equalizeHist(suavizada)
-
-        salida_preproceso = carpeta_salida / f"pre_{ruta_imagen.stem}.png"
-        cv2.imwrite(str(salida_preproceso), binaria)
+        _ = cv2.equalizeHist(suavizada)
 
         alto, ancho = gris.shape
         resultado_ocr = self.motor_ocr.procesar_imagen(ruta_imagen)
@@ -37,7 +34,6 @@ class ProcesadorImagenOpenCV:
             "ruta": str(ruta_imagen),
             "ancho": int(ancho),
             "alto": int(alto),
-            "salida_preproceso": str(salida_preproceso),
-            "nota": "Imagen detectada y preprocesada con OpenCV",
+            "nota": "Imagen detectada y procesada con OpenCV",
             "ocr": resultado_ocr,
         }

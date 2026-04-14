@@ -44,18 +44,15 @@ class ProcesadorPDF:
 
         reader = PdfReader(str(ruta_pdf))
         paginas = len(reader.pages)
-        texto_paginas: list[str] = []
         total_palabras = 0
 
         for i, page in enumerate(reader.pages, start=1):
             texto = page.extract_text() or ""
-            texto_paginas.append(f"--- PAGINA {i} ---\n{texto}\n")
             total_palabras += len(texto.split())
 
         es_escaneado = total_palabras < UMBRAL_PALABRAS_ESCANEADO
 
         salida_texto = carpeta_salida / f"texto_{ruta_pdf.stem}.txt"
-        salida_texto.write_text("\n".join(texto_paginas), encoding="utf-8")
 
         resultado = {
             "paginas": paginas,

@@ -39,6 +39,7 @@ class MotorOCRPaddle:
         self.use_angle_cls = use_angle_cls
         self.ocr_version = ocr_version
         self._ocr = None
+        self._structure = None
 
     def _get_ocr(self):
         if self._ocr is None:
@@ -65,6 +66,20 @@ class MotorOCRPaddle:
             )
         return self._ocr
 
+    def _get_structure(self):
+        if self._structure is None:
+            from paddleocr import PPStructureV3  # type: ignore
+
+            self._structure = PPStructureV3(
+                lang=self.language,
+                ocr_version=self.ocr_version,
+                use_formula_recognition=False,
+                use_chart_recognition=False,
+                use_seal_recognition=False,
+                use_region_detection=False,
+            )
+        return self._structure
+
     def procesar_imagen(self, ruta_imagen: Path) -> dict:
         try:
             return self._procesar_con_paddle(ruta_imagen)
@@ -84,7 +99,9 @@ class MotorOCRPaddle:
         ocr = self._get_ocr()
         resultados = ocr.ocr(str(ruta_imagen))
         detecciones = self._normalizar_detecciones(resultados)
-        bloques = self._agrupar_bloques(detecciones)
+        bloques_ocr = self._agrupar_bloques(detecciones)
+        bloques_layout = self._extraer_estructura_layout(ruta_imagen)
+        bloques = bloques_layout if bloques_layout else bloques_ocr
 
         texto_plano = "\n\n".join(bloque["texto"] for bloque in bloques if bloque.get("texto"))
         markdown_plano = self._bloques_a_markdown(bloques)
@@ -104,7 +121,84 @@ class MotorOCRPaddle:
                 for item in detecciones
             ],
             "estructura_documento": bloques,
+            "estructura_layout_detectada": bool(bloques_layout),
         }
+
+    def _extraer_estructura_layout(self, ruta_imagen: Path) -> list[dict]:
+        try:
+            estructura = self._get_structure()
+            resultados = estructura.predict(input=str(ruta_imagen), format_block_content=True)
+        except Exception:
+            return []
+
+        if not isinstance(resultados, list) or not resultados:
+            return []
+
+        primero = resultados[0]
+        parsing = []
+        if hasattr(primero, "get") and callable(getattr(primero, "get")):
+            parsing = primero.get("parsing_res_list") or []
+        elif isinstance(primero, dict):
+            parsing = primero.get("parsing_res_list") or []
+
+        bloques: list[dict] = []
+        for bloque in parsing:
+            if hasattr(bloque, "to_dict") and callable(getattr(bloque, "to_dict")):
+                try:
+                    raw = bloque.to_dict()
+                except Exception:
+                    continue
+            elif isinstance(bloque, dict):
+                raw = bloque
+            else:
+                continue
+
+            texto = str(raw.get("content") or "").strip()
+            if not texto:
+                continue
+
+            etiqueta = str(raw.get("label") or raw.get("order_label") or "paragraph")
+            tipo = self._mapear_tipo_layout(etiqueta)
+            bbox = self._bbox_layout_a_coords(raw.get("bbox"))
+            bloques.append(
+                {
+                    "tipo": tipo,
+                    "label_layout": etiqueta,
+                    "texto": texto,
+                    "bbox": bbox,
+                    "lineas": [],
+                }
+            )
+
+        bloques.sort(key=lambda item: (item["bbox"]["y_min"], item["bbox"]["x_min"]))
+        return bloques
+
+    def _mapear_tipo_layout(self, etiqueta: str) -> str:
+        e = etiqueta.lower()
+        if "header" in e or "title" in e:
+            return "heading"
+        if "table" in e:
+            return "table"
+        return "paragraph"
+
+    def _bbox_layout_a_coords(self, bbox) -> dict:
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                x_min = float(bbox[0])
+                y_min = float(bbox[1])
+                x_max = float(bbox[2])
+                y_max = float(bbox[3])
+                return {
+                    "x_min": int(round(min(x_min, x_max))),
+                    "y_min": int(round(min(y_min, y_max))),
+                    "x_max": int(round(max(x_min, x_max))),
+                    "y_max": int(round(max(y_min, y_max))),
+                    "ancho": int(round(abs(x_max - x_min))),
+                    "alto": int(round(abs(y_max - y_min))),
+                }
+            except Exception:
+                pass
+        return self._bbox_a_coords(bbox)
 
     def _normalizar_detecciones(self, resultados) -> list[dict]:
         detecciones: list[dict] = []

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 from pathlib import Path
+import re
 
 from motor_ocr import MotorOCRPaddle
 from procesador_imagen import ProcesadorImagenOpenCV
@@ -68,8 +69,13 @@ class EnrutadorProcesamiento:
                 resultados_imagenes.append(self.procesador_imagen.procesar(ruta_png_path, carpeta_salida))
 
             resultado_pdf["ocr"] = [resultado.get("ocr", {}) for resultado in resultados_imagenes]
-            resultado_pdf["vision_computer"] = resultados_imagenes
             resultado_pdf["nota"] = f'{resultado_pdf.get("nota", "")} -> OCR aplicado con PaddleOCR en todas las paginas'
+            resultado_pdf["paginas_procesadas_ocr"] = len(resultados_imagenes)
+
+            salida_texto = resultado_pdf.get("salida_texto")
+            if salida_texto:
+                texto_final = _extraer_markdown_o_texto(resultado_pdf)
+                Path(str(salida_texto)).write_text(_limpiar_html_de_tabla_para_txt(texto_final), encoding="utf-8")
             return resultado_pdf
 
         if archivo.tipo in {TipoArchivo.PNG, TipoArchivo.JPG, TipoArchivo.JPEG}:
@@ -99,11 +105,21 @@ def guardar_resultado_word(resultado: dict, carpeta_salida: Path, nombre_base: s
     document.add_heading("Texto OCR / Markdown", level=2)
     _agregar_bloques_al_documento(document, estructura, texto_plano)
 
-    document.add_heading("Estructura", level=2)
-    document.add_paragraph(json.dumps(estructura, ensure_ascii=False, indent=2))
-
-    document.save(str(ruta_salida))
-    return ruta_salida
+    rutas_paginas = resultado.get("salida_png_500dpi")
+    if isinstance(rutas_paginas, list) and rutas_paginas:
+        document.add_heading("Vista Original", level=2)
+        for ruta in rutas_paginas:
+            try:
+                document.add_picture(str(ruta))
+            except Exception:
+                continue
+    try:
+        document.save(str(ruta_salida))
+        return ruta_salida
+    except PermissionError:
+        ruta_alternativa = carpeta_salida / f"ocr_{nombre_base}_nuevo.docx"
+        document.save(str(ruta_alternativa))
+        return ruta_alternativa
 
 
 def _agregar_bloques_al_documento(document, estructura, texto_plano: str) -> None:
@@ -115,6 +131,12 @@ def _agregar_bloques_al_documento(document, estructura, texto_plano: str) -> Non
             if not texto:
                 continue
             tipo = str(bloque.get("tipo", "paragraph"))
+            etiqueta = str(bloque.get("label_layout", "")).lower()
+
+            if tipo == "table" or "table" in etiqueta or "<table" in texto.lower():
+                if _agregar_tabla_html_si_existe(document, texto):
+                    continue
+
             if tipo == "heading":
                 document.add_heading(texto, level=2)
             else:
@@ -166,37 +188,6 @@ def _extraer_markdown_o_texto(resultado: dict) -> str:
             return "\n".join(str(item) for item in texto if str(item).strip())
         return str(texto)
 
-    vision_computer = resultado.get("vision_computer")
-    if isinstance(vision_computer, list):
-        partes = []
-        for item in vision_computer:
-            if not isinstance(item, dict):
-                continue
-            ocr_vision = item.get("ocr")
-            if not isinstance(ocr_vision, dict):
-                continue
-            if ocr_vision.get("markdown_plano"):
-                partes.append(str(ocr_vision.get("markdown_plano")))
-            elif ocr_vision.get("texto_plano"):
-                texto = ocr_vision.get("texto_plano")
-                if isinstance(texto, list):
-                    partes.append("\n".join(str(item) for item in texto if str(item).strip()))
-                elif texto:
-                    partes.append(str(texto))
-        if partes:
-            return "\n\n".join(partes)
-
-    if isinstance(vision_computer, dict):
-        ocr_vision = vision_computer.get("ocr")
-        if isinstance(ocr_vision, dict) and ocr_vision.get("texto_plano"):
-            if ocr_vision.get("markdown_plano"):
-                return str(ocr_vision.get("markdown_plano"))
-            texto = ocr_vision.get("texto_plano")
-            if isinstance(texto, list):
-                return "\n".join(str(item) for item in texto if str(item).strip())
-            if texto:
-                return str(texto)
-
     return ""
 
 
@@ -229,24 +220,59 @@ def _extraer_estructura(resultado: dict):
         if estructuras:
             return estructuras
 
-    vision_computer = resultado.get("vision_computer")
-    if isinstance(vision_computer, list):
-        estructuras = []
-        for item in vision_computer:
-            if not isinstance(item, dict):
-                continue
-            ocr_vision = item.get("ocr")
-            if isinstance(ocr_vision, dict) and ocr_vision.get("estructura_documento"):
-                estructuras.extend(ocr_vision.get("estructura_documento") or [])
-        if estructuras:
-            return estructuras
-
-    if isinstance(vision_computer, dict):
-        ocr_vision = vision_computer.get("ocr")
-        if isinstance(ocr_vision, dict):
-            return ocr_vision.get("estructura_documento")
-
     return []
+
+
+def _agregar_tabla_html_si_existe(document, texto: str) -> bool:
+    if "<table" not in texto.lower():
+        return False
+
+    filas = re.findall(r"<tr>(.*?)</tr>", texto, flags=re.IGNORECASE | re.DOTALL)
+    if not filas:
+        return False
+
+    tabla_parseada: list[list[str]] = []
+    for fila in filas:
+        celdas = re.findall(r"<t[dh]>(.*?)</t[dh]>", fila, flags=re.IGNORECASE | re.DOTALL)
+        celdas_limpias = [re.sub(r"<[^>]+>", "", celda).strip() for celda in celdas]
+        if celdas_limpias:
+            tabla_parseada.append(celdas_limpias)
+
+    if not tabla_parseada:
+        return False
+
+    total_columnas = max(len(fila) for fila in tabla_parseada)
+    tabla = document.add_table(rows=len(tabla_parseada), cols=total_columnas)
+    tabla.style = "Table Grid"
+
+    for i, fila in enumerate(tabla_parseada):
+        for j, valor in enumerate(fila):
+            tabla.cell(i, j).text = valor
+
+    return True
+
+
+def _limpiar_html_de_tabla_para_txt(texto: str) -> str:
+    if "<table" not in texto.lower():
+        return texto
+
+    def reemplazo_tabla(match):
+        tabla_html = match.group(0)
+        filas = re.findall(r"<tr>(.*?)</tr>", tabla_html, flags=re.IGNORECASE | re.DOTALL)
+        lineas = []
+        for fila in filas:
+            celdas = re.findall(r"<t[dh]>(.*?)</t[dh]>", fila, flags=re.IGNORECASE | re.DOTALL)
+            celdas_limpias = [re.sub(r"<[^>]+>", "", celda).strip() for celda in celdas]
+            if celdas_limpias:
+                lineas.append(" | ".join(celdas_limpias))
+        return "\n".join(lineas)
+
+    return re.sub(
+        r"<table.*?>.*?</table>",
+        reemplazo_tabla,
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
 
 def _serializar(valor):
@@ -276,7 +302,7 @@ def main() -> None:
     print(f"- {archivo.nombre} -> tipo={archivo.tipo.value}")
     print(f"Resultado guardado en: {json_generado}")
     print(f"Documento Word guardado en: {docx_generado}")
-    for clave in ("salida_pdf", "salida_texto", "salida_preview", "salida_preproceso"):
+    for clave in ("salida_pdf", "salida_texto", "salida_preview"):
         valor = resultado.get(clave)
         if valor:
             print(f"- {clave}: {valor}")

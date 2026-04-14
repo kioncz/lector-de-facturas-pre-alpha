@@ -1,6 +1,7 @@
-pypdf==5.4.0
-opencv-python==4.11.0.86
-PyMuPDF==1.25.1
+pypdf==6.10.0
+opencv-python==4.13.0.92
+PyMuPDF==1.27.2.2
 python-docx==1.2.0
 paddleocr==3.4.0
 paddlepaddle==3.2.2
+paddlex==3.4.3

@@ -20,7 +20,7 @@ class TipoArchivo(str, Enum):
 EXTENSIONES_PERMITIDAS = {item.value for item in TipoArchivo}
 
 # Flujo actual: procesar un solo archivo definido por ruta directa.
-RUTA_ARCHIVO_ENTRADA = "entrada/pdf_con_img.pdf"
+RUTA_ARCHIVO_ENTRADA = "entrada/ejemplo.pdf"  # Cambia esta ruta para probar con diferentes archivos.  
 
 
 @dataclass(frozen=True)

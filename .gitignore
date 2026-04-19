@@ -1,0 +1,12 @@
+.venv/
+.venv311/
+__pycache__/
+*.pyc
+.env
+.idea/
+.vscode/
+salida/
+salida_test*/
+entrada/
+*.log
+modelo/gemma-*.gguf

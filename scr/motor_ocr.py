@@ -1,88 +1,210 @@
 from __future__ import annotations
 
-import os
+import base64
 from pathlib import Path
 
 
-def _serializar(valor):
-    try:
-        from numpy import ndarray  # type: ignore
-    except ImportError:
-        ndarray = ()
+class MotorOCR:
+    def __init__(
+        self,
+        model_path: str = "modelo/gemma-4-E4B-it-Q4_K_M.gguf",
+        mmproj_path: str = "modelo/mmproj-F16.gguf",
+        n_threads: int = 4,
+        n_ctx: int = 4096,
+        max_tokens: int = 500,
+    ) -> None:
+        self.model_path = model_path
+        self.mmproj_path = mmproj_path
+        self.n_threads = n_threads
+        self.n_ctx = n_ctx
+        self.max_tokens = max_tokens
+        self._llm = None
+        self._supports_vision: bool | None = None
 
-    if isinstance(valor, Path):
-        return str(valor)
-    if isinstance(valor, dict):
-        return {str(clave): _serializar(v) for clave, v in valor.items()}
-    if isinstance(valor, list):
-        return [_serializar(item) for item in valor]
-    if isinstance(valor, tuple):
-        return [_serializar(item) for item in valor]
-    if ndarray and isinstance(valor, ndarray):
-        return valor.tolist()
-    if hasattr(valor, "item") and callable(getattr(valor, "item")):
+    def _resolver_modelo(self) -> Path:
+        ruta_modelo = Path(self.model_path)
+        if not ruta_modelo.is_absolute():
+            raiz_proyecto = Path(__file__).resolve().parent.parent
+            ruta_modelo = (raiz_proyecto / ruta_modelo).resolve()
+        return ruta_modelo
+
+    def _detectar_soporte_vision(self, ruta_modelo: Path) -> bool:
+        # Si el mmproj existe, asumimos que el modelo soporta multimodal
+        ruta_mmproj = Path(self.mmproj_path)
+        if not ruta_mmproj.is_absolute():
+            raiz_proyecto = Path(__file__).resolve().parent.parent
+            ruta_mmproj = (raiz_proyecto / ruta_mmproj).resolve()
+        
+        if ruta_mmproj.exists():
+            return True
+        
         try:
-            return valor.item()
+            from gguf import GGUFReader  # type: ignore
         except Exception:
-            return str(valor)
-    return valor
+            return False
 
+        try:
+            reader = GGUFReader(str(ruta_modelo))
+            keys = [str(key).lower() for key in reader.fields.keys()]
+        except Exception:
+            return False
 
-class MotorOCRPaddle:
-    def __init__(self, language: str = "es", use_angle_cls: bool = False, ocr_version: str = "PP-OCRv3") -> None:
-        os.environ.setdefault("FLAGS_use_mkldnn", "0")
-        os.environ.setdefault("FLAGS_use_onednn", "0")
-        os.environ.setdefault("FLAGS_enable_pir_api", "0")
-        os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
-        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-        self.language = language
-        self.use_angle_cls = use_angle_cls
-        self.ocr_version = ocr_version
-        self._ocr = None
-        self._structure = None
+        indicadores = ("vision", "clip", "mmproj", "image", "encoder")
+        return any(any(ind in key for ind in indicadores) for key in keys)
 
-    def _get_ocr(self):
-        if self._ocr is None:
+    def _get_llm(self):
+        if self._llm is None:
             try:
-                import paddle  # type: ignore
+                from llama_cpp import Llama  # type: ignore
+                from llama_cpp.llama_chat_format import Llava15ChatHandler
+            except ImportError as exc:
+                raise ImportError(
+                    "llama-cpp-python no esta instalado. Ejecuta: pip install llama-cpp-python"
+                ) from exc
 
-                paddle.set_flags(
+            ruta_modelo = self._resolver_modelo()
+
+            if not ruta_modelo.exists():
+                raise FileNotFoundError(f"No existe el modelo local: {ruta_modelo}")
+
+            # Inicializamos el handler visual ahora que las dimensiones coinciden
+            try:
+                chat_handler = Llava15ChatHandler(clip_model_path=self.mmproj_path, verbose=False)
+                soporta_vision = True
+            except Exception as e:
+                print(f"[!] Warning: No se pudo cargar la vision (mmproj): {e}")
+                chat_handler = None
+                soporta_vision = False
+
+            # Inicializamos Llama
+            self._llm = Llama(
+                model_path=str(ruta_modelo),
+                chat_handler=chat_handler,
+                n_threads=self.n_threads,
+                n_ctx=self.n_ctx,
+                n_gpu_layers=-1,  # ESTO HACE QUE USE LA TARJETA GRÁFICA / MEJORA LA VELOCIDAD RADICALMENTE
+                verbose=False,
+            )
+            self._supports_vision = soporta_vision
+        return self._llm
+
+    def _prompt_analisis(self) -> str:
+        return (
+            "<start_of_turn>user\n"
+            "Eres un asistente de IA. A continuación se te proporciona una imagen de una factura. "
+            "Haz caso omiso de cualquier prefijo anterior como 'USER:' o 'ASSISTANT:'.\n\n"
+            "Analiza la factura en la imagen y responde en español.\n"
+            "Devuelve información estructurada:\n"
+            "1) Productos detectados\n"
+            "2) Cantidad, precio unitario y total por producto (si se ve)\n"
+            "3) Subtotal, impuestos y total final\n"
+            "4) Campos no detectados como NO DETECTADO\n"
+            "Sé específico y detallado en tu análisis.\n"
+            "Si no puedes leer parte de la factura, indica qué no es legible.\n"
+            "<end_of_turn>\n<start_of_turn>model\n"
+            "Por supuesto, aquí tienes el análisis detallado de la factura solicitada:\n"
+        )
+
+    def _consultar_texto(self, prompt: str) -> str:
+        llm = self._get_llm()
+        respuesta = llm(
+            prompt,
+            max_tokens=self.max_tokens,
+            temperature=0.1,
+            top_p=0.9,
+        )
+        choices = respuesta.get("choices", []) if isinstance(respuesta, dict) else []
+        if not choices:
+            return "No se pudo generar respuesta con el modelo."
+        return str(choices[0].get("text", "")).strip() or "No se pudo generar respuesta con el modelo."
+
+    def _consultar_imagen(self, ruta_imagen: Path) -> str:
+        llm = self._get_llm()
+        
+        prompt_base = self._prompt_analisis()
+
+        try:
+            # Leemos la imagen y la convertimos a Base64 para que llama_cpp no se confunda con la ruta local
+            import base64
+            with open(ruta_imagen, "rb") as img_file:
+                b64_img = base64.b64encode(img_file.read()).decode("utf-8")
+
+            # Enviamos el formato chat_completion como antes
+            # Si el modelo no puede ver la imagen, devolverá una respuesta generada basándose en el prompt.
+            resp = llm.create_chat_completion(
+                messages=[
                     {
-                        "FLAGS_use_mkldnn": False,
-                        "FLAGS_use_onednn": False,
-                        "FLAGS_enable_pir_api": False,
-                        "FLAGS_enable_pir_in_executor": False,
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_base},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"},
+                            },
+                        ],
                     }
-                )
-            except Exception:
-                pass
-
-            from paddleocr import PaddleOCR  # type: ignore
-
-            self._ocr = PaddleOCR(
-                lang=self.language,
-                use_angle_cls=self.use_angle_cls,
-                ocr_version=self.ocr_version,
+                ],
+                max_tokens=self.max_tokens,
+                temperature=0.1,
             )
-        return self._ocr
+        except Exception as exc:
+            raise RuntimeError(
+                f"Error procesando imagen con soporte multimodal: {exc}"
+            ) from exc
 
-    def _get_structure(self):
-        if self._structure is None:
-            from paddleocr import PPStructureV3  # type: ignore
+        choices = resp.get("choices", []) if isinstance(resp, dict) else []
+        if not choices:
+            return "No se pudo generar respuesta con el modelo."
 
-            self._structure = PPStructureV3(
-                lang=self.language,
-                ocr_version=self.ocr_version,
-                use_formula_recognition=False,
-                use_chart_recognition=False,
-                use_seal_recognition=False,
-                use_region_detection=False,
-            )
-        return self._structure
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        contenido = message.get("content", "") if isinstance(message, dict) else ""
+        return str(contenido).strip() or "No se pudo generar respuesta con el modelo."
+
+    def procesar_texto(self, texto: str, origen: str = "entrada.txt") -> dict:
+        contenido = (texto or "").strip()
+        if not contenido:
+            return {
+                "motor": "llama-cpp-local",
+                "archivo": origen,
+                "ruta": origen,
+                "texto_plano": "",
+                "markdown_plano": "",
+                "warning": "El archivo de texto esta vacio.",
+            }
+
+        try:
+            prompt = f"{self._prompt_analisis()}\\n\\nTEXTO DE FACTURA:\\n{contenido}\\n\\nRESPUESTA:"
+            respuesta_modelo = self._consultar_texto(prompt)
+            return {
+                "motor": "llama-cpp-local",
+                "archivo": origen,
+                "ruta": origen,
+                "texto_plano": contenido,
+                "markdown_plano": respuesta_modelo,
+            }
+        except Exception as exc:
+            return {
+                "motor": "error",
+                "archivo": origen,
+                "ruta": origen,
+                "texto_plano": contenido,
+                "markdown_plano": "",
+                "warning": f"No se pudo analizar el texto con el modelo: {exc}",
+            }
 
     def procesar_imagen(self, ruta_imagen: Path) -> dict:
         try:
-            return self._procesar_con_paddle(ruta_imagen)
+            if not ruta_imagen.exists():
+                raise FileNotFoundError(f"No existe la imagen: {ruta_imagen}")
+
+            respuesta_modelo = self._consultar_imagen(ruta_imagen)
+            return {
+                "motor": "llama-cpp-local",
+                "archivo": ruta_imagen.name,
+                "ruta": str(ruta_imagen),
+                "texto_plano": "",
+                "markdown_plano": respuesta_modelo,
+            }
         except Exception as exc:
             return {
                 "motor": "error",
@@ -90,284 +212,5 @@ class MotorOCRPaddle:
                 "ruta": str(ruta_imagen),
                 "texto_plano": "",
                 "markdown_plano": "",
-                "lineas": [],
-                "estructura_documento": [],
-                "warning": f"No se pudo ejecutar PaddleOCR: {exc}",
+                "warning": f"No se pudo analizar la imagen con el modelo: {exc}",
             }
-
-    def _procesar_con_paddle(self, ruta_imagen: Path) -> dict:
-        ocr = self._get_ocr()
-        resultados = ocr.ocr(str(ruta_imagen))
-        detecciones = self._normalizar_detecciones(resultados)
-        bloques_ocr = self._agrupar_bloques(detecciones)
-        bloques_layout = self._extraer_estructura_layout(ruta_imagen)
-        bloques = bloques_layout if bloques_layout else bloques_ocr
-
-        texto_plano = "\n\n".join(bloque["texto"] for bloque in bloques if bloque.get("texto"))
-        markdown_plano = self._bloques_a_markdown(bloques)
-
-        return {
-            "motor": "paddleocr",
-            "archivo": ruta_imagen.name,
-            "ruta": str(ruta_imagen),
-            "texto_plano": texto_plano,
-            "markdown_plano": markdown_plano,
-            "lineas": [
-                {
-                    "texto": item["texto"],
-                    "confianza": item["confianza"],
-                    "bbox": item["bbox"],
-                }
-                for item in detecciones
-            ],
-            "estructura_documento": bloques,
-            "estructura_layout_detectada": bool(bloques_layout),
-        }
-
-    def _extraer_estructura_layout(self, ruta_imagen: Path) -> list[dict]:
-        try:
-            estructura = self._get_structure()
-            resultados = estructura.predict(input=str(ruta_imagen), format_block_content=True)
-        except Exception:
-            return []
-
-        if not isinstance(resultados, list) or not resultados:
-            return []
-
-        primero = resultados[0]
-        parsing = []
-        if hasattr(primero, "get") and callable(getattr(primero, "get")):
-            parsing = primero.get("parsing_res_list") or []
-        elif isinstance(primero, dict):
-            parsing = primero.get("parsing_res_list") or []
-
-        bloques: list[dict] = []
-        for bloque in parsing:
-            if hasattr(bloque, "to_dict") and callable(getattr(bloque, "to_dict")):
-                try:
-                    raw = bloque.to_dict()
-                except Exception:
-                    continue
-            elif isinstance(bloque, dict):
-                raw = bloque
-            else:
-                continue
-
-            texto = str(raw.get("content") or "").strip()
-            if not texto:
-                continue
-
-            etiqueta = str(raw.get("label") or raw.get("order_label") or "paragraph")
-            tipo = self._mapear_tipo_layout(etiqueta)
-            bbox = self._bbox_layout_a_coords(raw.get("bbox"))
-            bloques.append(
-                {
-                    "tipo": tipo,
-                    "label_layout": etiqueta,
-                    "texto": texto,
-                    "bbox": bbox,
-                    "lineas": [],
-                }
-            )
-
-        bloques.sort(key=lambda item: (item["bbox"]["y_min"], item["bbox"]["x_min"]))
-        return bloques
-
-    def _mapear_tipo_layout(self, etiqueta: str) -> str:
-        e = etiqueta.lower()
-        if "header" in e or "title" in e:
-            return "heading"
-        if "table" in e:
-            return "table"
-        return "paragraph"
-
-    def _bbox_layout_a_coords(self, bbox) -> dict:
-        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-            try:
-                x_min = float(bbox[0])
-                y_min = float(bbox[1])
-                x_max = float(bbox[2])
-                y_max = float(bbox[3])
-                return {
-                    "x_min": int(round(min(x_min, x_max))),
-                    "y_min": int(round(min(y_min, y_max))),
-                    "x_max": int(round(max(x_min, x_max))),
-                    "y_max": int(round(max(y_min, y_max))),
-                    "ancho": int(round(abs(x_max - x_min))),
-                    "alto": int(round(abs(y_max - y_min))),
-                }
-            except Exception:
-                pass
-        return self._bbox_a_coords(bbox)
-
-    def _normalizar_detecciones(self, resultados) -> list[dict]:
-        detecciones: list[dict] = []
-        for bbox, texto, confianza in self._iterar_detecciones(resultados):
-            texto = (texto or "").strip()
-            if not texto:
-                continue
-            detecciones.append(
-                {
-                    "texto": texto,
-                    "confianza": float(confianza),
-                    "bbox": self._bbox_a_coords(bbox),
-                }
-            )
-
-        detecciones.sort(key=lambda item: (item["bbox"]["y_min"], item["bbox"]["x_min"]))
-        return detecciones
-
-    def _iterar_detecciones(self, resultados):
-        if not resultados:
-            return
-
-        if self._parece_resultado_dict(resultados):
-            yield from self._extraer_de_resultado_dict(resultados)
-            return
-
-        if isinstance(resultados, (list, tuple)) and len(resultados) == 1 and self._parece_lista_de_detecciones(resultados[0]):
-            yield from self._extraer_de_lista(resultados[0])
-            return
-
-        if self._parece_lista_de_detecciones(resultados):
-            yield from self._extraer_de_lista(resultados)
-            return
-
-        if isinstance(resultados, (list, tuple)):
-            for item in resultados:
-                if self._parece_resultado_dict(item):
-                    yield from self._extraer_de_resultado_dict(item)
-                elif self._parece_deteccion(item):
-                    yield self._extraer_deteccion(item)
-                elif self._parece_lista_de_detecciones(item):
-                    yield from self._extraer_de_lista(item)
-
-    def _parece_lista_de_detecciones(self, valor) -> bool:
-        return isinstance(valor, (list, tuple)) and bool(valor) and self._parece_deteccion(valor[0])
-
-    def _parece_deteccion(self, valor) -> bool:
-        if not isinstance(valor, (list, tuple)):
-            return False
-
-        if len(valor) >= 2 and isinstance(valor[1], (list, tuple)) and len(valor[1]) >= 2:
-            return True
-
-        if len(valor) >= 3 and isinstance(valor[1], str):
-            return True
-
-        return False
-
-    def _parece_resultado_dict(self, valor) -> bool:
-        return isinstance(valor, dict) and "dt_polys" in valor and "rec_texts" in valor
-
-    def _extraer_de_resultado_dict(self, resultado: dict):
-        bboxes = resultado.get("dt_polys") or []
-        textos = resultado.get("rec_texts") or []
-        confianzas = resultado.get("rec_scores") or []
-        total = min(len(bboxes), len(textos), len(confianzas))
-        for i in range(total):
-            yield bboxes[i], textos[i], confianzas[i]
-
-    def _extraer_de_lista(self, lista):
-        for item in lista:
-            if self._parece_deteccion(item):
-                yield self._extraer_deteccion(item)
-
-    def _extraer_deteccion(self, item):
-        bbox = item[0]
-        if len(item) >= 3 and isinstance(item[1], str):
-            texto, confianza = item[1], item[2]
-        else:
-            texto, confianza = item[1][0], item[1][1]
-        return bbox, texto, confianza
-
-    def _bbox_a_coords(self, bbox) -> dict:
-        puntos = []
-        if bbox is None:
-            iterable_bbox = []
-        else:
-            iterable_bbox = bbox
-
-        for punto in iterable_bbox:
-            try:
-                x_valor = float(punto[0])
-                y_valor = float(punto[1])
-            except Exception:
-                continue
-            puntos.append((x_valor, y_valor))
-
-        if not puntos:
-            return {"x_min": 0, "y_min": 0, "x_max": 0, "y_max": 0, "ancho": 0, "alto": 0}
-
-        xs = [p[0] for p in puntos]
-        ys = [p[1] for p in puntos]
-        x_min = min(xs)
-        x_max = max(xs)
-        y_min = min(ys)
-        y_max = max(ys)
-        return {
-            "x_min": int(round(x_min)),
-            "y_min": int(round(y_min)),
-            "x_max": int(round(x_max)),
-            "y_max": int(round(y_max)),
-            "ancho": int(round(x_max - x_min)),
-            "alto": int(round(y_max - y_min)),
-        }
-
-    def _agrupar_bloques(self, detecciones: list[dict]) -> list[dict]:
-        if not detecciones:
-            return []
-
-        bloques: list[dict] = []
-        bloque_actual: list[dict] = [detecciones[0]]
-        ultimo_y = detecciones[0]["bbox"]["y_max"]
-
-        for item in detecciones[1:]:
-            gap = item["bbox"]["y_min"] - ultimo_y
-            if gap > 28:
-                bloques.append(self._construir_bloque(bloque_actual))
-                bloque_actual = [item]
-            else:
-                bloque_actual.append(item)
-            ultimo_y = max(ultimo_y, item["bbox"]["y_max"])
-
-        bloques.append(self._construir_bloque(bloque_actual))
-        return bloques
-
-    def _construir_bloque(self, items: list[dict]) -> dict:
-        items_ordenados = sorted(items, key=lambda item: (item["bbox"]["y_min"], item["bbox"]["x_min"]))
-        texto = " ".join(item["texto"] for item in items_ordenados).strip()
-        caja = {
-            "x_min": min(item["bbox"]["x_min"] for item in items_ordenados),
-            "y_min": min(item["bbox"]["y_min"] for item in items_ordenados),
-            "x_max": max(item["bbox"]["x_max"] for item in items_ordenados),
-            "y_max": max(item["bbox"]["y_max"] for item in items_ordenados),
-        }
-        caja["ancho"] = caja["x_max"] - caja["x_min"]
-        caja["alto"] = caja["y_max"] - caja["y_min"]
-        tipo = "heading" if self._parece_titulo(texto) else "paragraph"
-        return {
-            "tipo": tipo,
-            "texto": texto,
-            "lineas": items_ordenados,
-            "bbox": caja,
-        }
-
-    def _parece_titulo(self, texto: str) -> bool:
-        limpio = texto.strip()
-        if not limpio:
-            return False
-        palabras = limpio.split()
-        return (len(limpio) <= 60 and limpio.isupper()) or limpio.endswith(":") or (len(palabras) <= 4 and limpio[:1].isupper())
-
-    def _bloques_a_markdown(self, bloques: list[dict]) -> str:
-        partes: list[str] = []
-        for bloque in bloques:
-            texto = bloque.get("texto", "").strip()
-            if not texto:
-                continue
-            if bloque.get("tipo") == "heading":
-                partes.append(f"## {texto}")
-            else:
-                partes.append(texto)
-        return "\n\n".join(partes)

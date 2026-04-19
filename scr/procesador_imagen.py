@@ -2,38 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from motor_ocr import MotorOCRPaddle
+from motor_ocr import MotorOCR
 
 
-class ProcesadorImagenOpenCV:
-    def __init__(self, motor_ocr: MotorOCRPaddle | None = None) -> None:
-        self.motor_ocr = motor_ocr or MotorOCRPaddle()
+class ProcesadorImagen:
+    def __init__(self, motor_ocr: MotorOCR | None = None) -> None:
+        self.motor_ocr = motor_ocr or MotorOCR()
 
-    def procesar(self, ruta_imagen: Path, carpeta_salida: Path) -> dict:
-        try:
-            import cv2  # type: ignore
-        except ImportError as exc:
-            raise ImportError(
-                "OpenCV no esta instalado. Ejecuta: pip install opencv-python"
-            ) from exc
-
-        imagen = cv2.imread(str(ruta_imagen))
-        if imagen is None:
-            raise ValueError(f"No se pudo leer la imagen: {ruta_imagen.name}")
-
-        gris = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
-        suavizada = cv2.GaussianBlur(gris, (3, 3), 0)
-        _ = cv2.equalizeHist(suavizada)
-
-        alto, ancho = gris.shape
-        resultado_ocr = self.motor_ocr.procesar_imagen(ruta_imagen)
-
+    def procesar(self, ruta_imagen: Path) -> dict:
+        resultado_modelo = self.motor_ocr.procesar_imagen(ruta_imagen)
         return {
             "tipo": "imagen",
             "archivo": ruta_imagen.name,
             "ruta": str(ruta_imagen),
-            "ancho": int(ancho),
-            "alto": int(alto),
-            "nota": "Imagen detectada y procesada con OpenCV",
-            "ocr": resultado_ocr,
+            "modelo": resultado_modelo,
         }

@@ -2,9 +2,11 @@
 
 Proyecto Python para procesar facturas en PDF o imagen, con salida estructurada y lectura de tablas utilizando Inteligencia Artificial avanzada.
 
-*Nota de Créditos:* Este proyecto utiliza los modelos **Gemma Multimodal**, creados y entrenados por **Google**, aprovechando sus capacidades visuales y de comprensión de lenguaje natural para un análisis de facturas eficiente y preciso.
+*Nota de Créditos:* Este proyecto utiliza los siguientes modelos alojados mediante Git LFS:
+- **Gemma 4-E4B-it-Q4_K_M** creado y entrenado por **Google**. Este es el motor de razonamiento de lenguaje natural (LLM) que estructura e interpreta la factura.
+- **Proyector Multimodal mmproj-F16** también creado por **Google / AI community**. Es el encargado de convertir las imágenes para que el LLM pueda interpretar visualmente la tabla y campos.
 
-**Atención sobre el modelo:** Debido al tamaño de `gemma-4-E4B-it-Q4_K_M.gguf` (aprox. 5GB), no se incluye dentro del repositorio. Por favor, descárgalo directamente desde Hugging Face y colócalo en la carpeta `modelo/` antes de ejecutar. El archivo del proyector visual (`mmproj-F16.gguf`) sí se incluye mediante Git LFS.
+Ambos modelos son parte integral del procesamiento de facturas con IA avanzada.
 
 ## Version actual
 

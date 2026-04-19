@@ -8,4 +8,5 @@ __pycache__/
 salida/
 salida_test*/
 entrada/
-*.logmodelo/gemma-*.gguf
+*.log
+modelo/gemma-*.gguf

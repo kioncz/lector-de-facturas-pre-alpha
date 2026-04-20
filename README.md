@@ -10,16 +10,15 @@ Ambos modelos son parte integral del procesamiento de facturas con IA avanzada.
 
 ## Version actual
 
-v1.0.1
+v2.0.0
 
-## Novedades de v1.0.1
+## Novedades de v2.0.0
 
-- Mejor deteccion y lectura de bloques con estructura de documento.
-- Mejor lectura de tablas en facturas.
-- Exportacion Excel mas limpia y legible.
-- Correccion de duplicados en resultados.
-- Eliminacion de ruido en la lectura final.
-- Limpieza del motor OCR para dejar una base neutra sin dependencias acopladas.
+- Implementación del motor OCR avanzado basado en Google Gemma 4-E4B Multimodal.
+- Procesador PDF con detección automática de escaneados.
+- Salida estructurada JSON con metadatos.
+- Eliminación total de scripts de test obsoletos para limpiar el repositorio.
+- **Importante:** Debido a los límites de tamaño de GitHub, el archivo de 5GB (`gemma-4-E4B-it-Q4_K_M.gguf`) no se incluye en el repositorio. Debes descargarlo y colocarlo dentro de la carpeta `/modelo/`.
 
 ## Requisitos
 
